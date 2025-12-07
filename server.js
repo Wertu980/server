@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
@@ -20,6 +21,21 @@ app.use(express.json());
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRE_DAYS = parseInt(process.env.JWT_EXPIRE_DAYS || 30);
 
+// --- Auth middleware ---
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: "Unauthorized" });
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.id;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
+
 // --- Signup ---
 app.post("/signup", async (req, res) => {
   const { name, mobile, gender, age, password, confirmPassword } = req.body;
@@ -36,7 +52,7 @@ app.post("/signup", async (req, res) => {
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const userExists = await pool.query("SELECT * FROM users WHERE mobile=$1", [mobile]);
+    const userExists = await pool.query("SELECT id FROM users WHERE mobile=$1", [mobile]);
     if (userExists.rows.length)
       return res.status(400).json({ error: "User already exists" });
 
@@ -94,17 +110,53 @@ app.post("/refresh", (req, res) => {
 });
 
 // --- Me (get current user) ---
-app.get("/me", async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "Unauthorized" });
-
-  const token = authHeader.split(" ")[1];
+app.get("/me", authenticateToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const result = await pool.query("SELECT id,name,mobile,gender,age FROM users WHERE id=$1", [decoded.id]);
+    const result = await pool.query("SELECT id,name,mobile,gender,age FROM users WHERE id=$1", [req.userId]);
+    if (!result.rows.length) return res.status(404).json({ error: "User not found" });
     res.json({ user: result.rows[0] });
   } catch (err) {
-    return res.status(401).json({ error: "Invalid token" });
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/*
+  --- New: Get users list ---
+  GET /users
+  - Protected: requires Authorization: Bearer <token>
+  - Optional query: ?q=searchTerm  (matches name OR mobile)
+  - Response: { users: [ {id,name,mobile,gender,age}, ... ] }
+*/
+app.get("/users", authenticateToken, async (req, res) => {
+  const q = (req.query.q || "").trim();
+
+  try {
+    let result;
+    if (q) {
+      // simple case-insensitive search on name or mobile
+      const search = `%${q}%`;
+      result = await pool.query(
+        `SELECT id, name, mobile, gender, age
+FROM users
+WHERE name ILIKE $1 OR mobile ILIKE $1
+ORDER BY name ASC
+LIMIT 200`,
+        [search]
+      );
+    } else {
+      result = await pool.query(
+        `SELECT id, name, mobile, gender, age
+FROM users
+ORDER BY name ASC
+LIMIT 500`
+      );
+    }
+
+    res.json({ users: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
